@@ -1,141 +1,87 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr};
 
-use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::Mutex;
 use tokio::{io, net::UdpSocket};
 
 pub const MAX_PACKET_LEN: usize = 1024;
-
-#[derive(Debug)]
-pub struct DataPacket {
-    pub key: String,
-    pub data: Vec<u8>,
-}
+pub const CONNECT_STR: &str = "CONNECT";
 
 pub struct Server {
     addr: String,
-    sender: Sender<DataPacket>,
-    receiver: Mutex<Receiver<DataPacket>>,
-
-    connected_clients: Mutex<HashMap<SocketAddr, Arc<Relay>>>,
-    relay_clients: Mutex<HashMap<String, Arc<Relay>>>,
+    clients: HashMap<String, Vec<SocketAddr>>,
+    connections: HashMap<SocketAddr, String>,
 }
 
 impl Server {
-    pub fn new(addr: String, sender: Sender<DataPacket>, receiver: Receiver<DataPacket>) -> Self {
+    pub fn new(addr: String) -> Self {
         Self {
             addr,
-            sender,
-            receiver: Mutex::new(receiver),
-            connected_clients: Mutex::new(HashMap::new()),
-            relay_clients: Mutex::new(HashMap::new()),
+            clients: HashMap::new(),
+            connections: HashMap::new(),
         }
     }
 
-    pub async fn listen(&self) -> io::Result<()> {
+    pub async fn listen(&mut self) -> io::Result<()> {
         let socket = UdpSocket::bind(&self.addr).await?;
-        let r = Arc::new(socket);
-        let s = r.clone();
-        let (receive, forward) = tokio::join!(self.receive(r), self.forward(&s));
-
-        receive.and(forward)
+        self.receive(socket).await
     }
 
-    async fn forward(&self, socket: &Arc<UdpSocket>) -> io::Result<()> {
-        while let Some(packet) = self.receiver.lock().await.recv().await {
-            self.forward_packet(packet, socket).await?;
-        }
-        Ok(())
-    }
-
-    async fn forward_packet(&self, packet: DataPacket, socket: &Arc<UdpSocket>) -> io::Result<()> {
-        match self.relay_clients.lock().await.get(&packet.key) {
-            Some(relay) => {
-                socket.send_to(&packet.data, &relay.addr).await?;
-            }
-            _ => {
-                println!("No relay found for {}", packet.key);
-            }
-        }
-        Ok(())
-    }
-
-    async fn receive(&self, socket: Arc<UdpSocket>) -> io::Result<()> {
+    async fn receive(&mut self, socket: UdpSocket) -> io::Result<()> {
         let mut buf = [0; MAX_PACKET_LEN];
         loop {
-            let (len, addr) = socket.recv_from(&mut buf).await?;
-            self.receive_datagram(&buf[..len], addr).await?;
+            let (n, addr) = socket.recv_from(&mut buf).await?;
+            println!("Received {} bytes from {}", n, addr);
+
+            self.receive_datagram(&socket, &buf[..n], addr).await?;
         }
     }
 
-    async fn receive_datagram(&self, buf: &[u8], addr: SocketAddr) -> io::Result<()> {
-        match self.handle_datagram(buf, addr) {
-            Some(relay) => {
-                let connected_client = relay.clone();
-                let relay_client = relay.clone();
-
-                self.connected_clients
-                    .lock()
-                    .await
-                    .insert(addr, connected_client);
-                self.relay_clients
-                    .lock()
-                    .await
-                    .insert(relay_client.key.clone(), relay_client);
-            }
-            _ => match self.connected_clients.lock().await.get(&addr) {
-                Some(relay) => {
-                    let data = buf.to_vec();
-                    relay.send_data(data).await?;
-                }
-                _ => {
-                    println!("No relay found for {}", addr);
-                }
-            },
+    async fn receive_datagram(
+        &mut self,
+        socket: &UdpSocket,
+        buf: &[u8],
+        addr: SocketAddr,
+    ) -> io::Result<()> {
+        match self.handle_connect(buf) {
+            Some(key) => self.register_client(key, addr),
+            None => self.forward_packet(socket, buf, addr).await?,
         }
         Ok(())
     }
 
-    fn handle_datagram(&self, buf: &[u8], addr: SocketAddr) -> Option<Arc<Relay>> {
+    fn handle_connect(&self, buf: &[u8]) -> Option<String> {
         let data = std::str::from_utf8(&buf).unwrap().trim_end_matches("\n");
         let parts = data.split_whitespace().collect::<Vec<&str>>();
-        let cmd = parts[0];
+        if parts.len() == 2 && parts[0] == CONNECT_STR {
+            return Some(parts[1].to_string());
+        }
+        None
+    }
 
-        println!("command: {:?}", cmd);
-        match cmd {
-            "CONNECT" => {
-                let key = parts[1];
-                let relay = Relay::new(key.to_string(), addr, self.sender.clone());
-                Some(Arc::new(relay))
+    fn register_client(&mut self, key: String, addr: SocketAddr) {
+        println!("registering client: {}", key);
+        self.clients
+            .entry(key.clone())
+            .and_modify(|v| v.push(addr))
+            .or_insert(vec![addr]);
+
+        self.connections.insert(addr, key);
+    }
+
+    async fn forward_packet(
+        &self,
+        socket: &UdpSocket,
+        buf: &[u8],
+        addr: SocketAddr,
+    ) -> io::Result<()> {
+        if let Some(key) = self.connections.get(&addr) {
+            if let Some(clients) = self.clients.get(key) {
+                for client in clients {
+                    if client != &addr {
+                        socket.send_to(buf, client).await?;
+                    }
+                }
             }
-            _ => None,
         }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct Relay {
-    key: String,
-    addr: SocketAddr,
-    sender: Sender<DataPacket>,
-}
-
-impl Relay {
-    fn new(key: String, addr: SocketAddr, sender: Sender<DataPacket>) -> Self {
-        Self { key, addr, sender }
-    }
-
-    async fn send_data(&self, data: Vec<u8>) -> io::Result<()> {
-        match self
-            .sender
-            .send(DataPacket {
-                key: self.key.clone(),
-                data,
-            })
-            .await
-        {
-            Ok(_) => Ok(()),
-            Err(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
-        }
+        Ok(())
     }
 }

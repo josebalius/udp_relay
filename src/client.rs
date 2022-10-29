@@ -1,104 +1,94 @@
 use std::sync::Arc;
 
+use tokio::sync::mpsc;
 use tokio::{
     io,
     net::UdpSocket,
-    sync::{
-        mpsc::{Receiver, Sender},
-        Mutex,
-    },
+    sync::mpsc::{Receiver, Sender},
 };
 
 use crate::server;
 
-pub struct Client {
-    addr: String,
-    peer_addr: String,
-    key: String,
-    local_mode: bool,
+type Packet = Vec<u8>;
 
-    sender: Sender<server::DataPacket>,
-    receiver: Mutex<Receiver<server::DataPacket>>,
+pub struct Client {
+    remote_addr: String,
+    local_addr: String,
+    key: String,
 }
 
 impl Client {
-    pub fn new(
-        addr: String,
-        peer_addr: String,
-        key: String,
-        local_mode: bool,
-        sender: Sender<server::DataPacket>,
-        receiver: Receiver<server::DataPacket>,
-    ) -> Self {
+    pub fn new(remote_addr: String, local_addr: String, key: String) -> Self {
         Self {
-            addr,
-            peer_addr,
+            remote_addr,
+            local_addr,
             key,
-            local_mode,
-            sender,
-            receiver: Mutex::new(receiver),
         }
     }
 
-    pub async fn connect(&self) -> io::Result<()> {
+    pub async fn connect_and_relay(&self) -> io::Result<()> {
+        let (remote_sender, remote_receiver) = mpsc::channel(32);
+        let (local_sender, local_receiver) = mpsc::channel(32);
+        let (remote, local) = tokio::join!(
+            self.connect_and_relay_socket(&self.remote_addr, true, local_receiver, remote_sender),
+            self.connect_and_relay_socket(&self.local_addr, false, remote_receiver, local_sender)
+        );
+        remote.and(local)
+    }
+
+    async fn connect_and_relay_socket(
+        &self,
+        addr: &String,
+        send_connect: bool,
+        receiver: Receiver<Packet>,
+        sender: Sender<Packet>,
+    ) -> io::Result<()> {
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
+        socket.connect(addr).await?;
+
+        if send_connect {
+            self.send_connect(&socket).await?;
+        }
+
         let r = Arc::new(socket);
         let s = r.clone();
 
-        let (receive, forward) = tokio::join!(self.receive(r), self.forward(s));
-        receive.and(forward)
+        let (receive, send) = tokio::join!(self.receive(r, sender), self.send(s, receiver));
+        receive.and(send)
     }
 
-    async fn receive(&self, socket: Arc<UdpSocket>) -> io::Result<()> {
-        if !self.local_mode {
-            self.connect_to_relay(&socket).await?;
-        }
+    async fn send_connect(&self, socket: &UdpSocket) -> io::Result<()> {
+        let data = format!("{} {}", server::CONNECT_STR, self.key);
+        socket.send(data.as_bytes()).await?;
+        Ok(())
+    }
 
+    async fn receive(&self, socket: Arc<UdpSocket>, sender: Sender<Packet>) -> io::Result<()> {
         let mut buf = [0; server::MAX_PACKET_LEN];
         loop {
-            let (n, addr) = socket.recv_from(&mut buf).await?;
-            println!("Received {} bytes from {}", n, addr);
+            let (n, _) = socket.recv_from(&mut buf).await?;
+            println!("Received {} bytes from remote", n);
 
-            let data = std::str::from_utf8(&buf).unwrap();
-            println!("Data: {:?}", data);
-
-            match self
-                .sender
-                .send(server::DataPacket {
-                    key: self.key.clone(),
-                    data: buf[..n].to_vec(),
-                })
-                .await
-            {
+            let packet = buf[..n].to_vec();
+            match sender.send(packet).await {
                 Ok(_) => {}
-                Err(e) => {
-                    println!("Error sending packet to server: {}", e);
+                Err(_) => {
+                    println!("Failed to send packet from receive");
                 }
             }
         }
     }
 
-    async fn connect_to_relay(&self, socket: &Arc<UdpSocket>) -> io::Result<()> {
-        let data = format!("CONNECT {}", self.key);
-        socket.send_to(data.as_bytes(), &self.peer_addr).await?;
-
-        Ok(())
-    }
-
-    async fn forward(&self, socket: Arc<UdpSocket>) -> io::Result<()> {
-        while let Some(packet) = self.receiver.lock().await.recv().await {
-            self.forward_packet(packet, &socket).await?;
+    async fn send(&self, socket: Arc<UdpSocket>, mut receiver: Receiver<Packet>) -> io::Result<()> {
+        while let Some(packet) = receiver.recv().await {
+            println!("Sending {} bytes to remote", packet.len());
+            match socket.send(&packet).await {
+                Ok(_) => {}
+                Err(_) => {
+                    println!("Failed to send packet from send");
+                }
+            }
         }
-
-        Ok(())
-    }
-
-    async fn forward_packet(
-        &self,
-        packet: server::DataPacket,
-        socket: &Arc<UdpSocket>,
-    ) -> io::Result<()> {
-        socket.send_to(&packet.data, &self.peer_addr).await?;
         Ok(())
     }
 }
