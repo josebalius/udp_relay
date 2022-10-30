@@ -57,12 +57,9 @@ impl Client {
         receive.and(send)
     }
 
-    async fn send_connect(&self, socket: &UdpSocket) -> io::Result<()> {
+    async fn send_connect(&self, socket: &UdpSocket) -> io::Result<usize> {
         let data = format!("{} {}", server::CONNECT_STR, self.key);
-        match socket.send(data.as_bytes()).await {
-            Err(e) => Err(e),
-            _ => Ok(()),
-        }
+        socket.send(data.as_bytes()).await
     }
 
     async fn receive(&self, socket: Arc<UdpSocket>, sender: Sender<Packet>) -> io::Result<()> {
@@ -72,11 +69,8 @@ impl Client {
             println!("Received {} bytes from remote", n);
 
             let packet = buf[..n].to_vec();
-            match sender.send(packet).await {
-                Ok(_) => {}
-                Err(_) => {
-                    println!("Failed to send packet from receive");
-                }
+            if let Err(_) = sender.send(packet).await {
+                println!("Failed to send packet from receive");
             }
         }
     }
@@ -84,11 +78,8 @@ impl Client {
     async fn send(&self, socket: Arc<UdpSocket>, mut receiver: Receiver<Packet>) -> io::Result<()> {
         while let Some(packet) = receiver.recv().await {
             println!("Sending {} bytes to remote", packet.len());
-            match socket.send(&packet).await {
-                Ok(_) => {}
-                Err(_) => {
-                    println!("Failed to send packet from send");
-                }
+            if let Err(_) = socket.send(&packet).await {
+                println!("Failed to send packet from send");
             }
         }
         Ok(())

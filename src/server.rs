@@ -42,10 +42,12 @@ impl Server {
         addr: SocketAddr,
     ) -> io::Result<()> {
         match self.handle_connect(buf) {
-            Some(key) => self.register_client(key, addr),
-            None => self.forward_packet(socket, buf, addr).await?,
+            Some(key) => {
+                self.register_client(key, addr);
+                Ok(())
+            }
+            _ => self.forward_packet(socket, buf, addr).await,
         }
-        Ok(())
     }
 
     fn handle_connect(&self, buf: &[u8]) -> Option<String> {
@@ -58,6 +60,10 @@ impl Server {
     }
 
     fn register_client(&mut self, key: String, addr: SocketAddr) {
+        if let Some(_) = self.connections.get(&addr) {
+            return; // already registered, no-op
+        }
+
         println!("registering client: {}", key);
         self.clients
             .entry(key.clone())
@@ -88,14 +94,17 @@ impl Server {
             })
             .flatten()
         {
-            Some(futures) => match futures::future::join_all(futures)
-                .await
-                .into_iter()
-                .find(|f| f.is_err())
-            {
-                Some(Err(e)) => Err(e),
-                _ => Ok(()),
-            },
+            Some(futures) => {
+                if let Some(Err(e)) = futures::future::join_all(futures)
+                    .await
+                    .into_iter()
+                    .find(|f| f.is_err())
+                {
+                    return Err(e);
+                }
+
+                Ok(())
+            }
 
             _ => Ok(()),
         }
