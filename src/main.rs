@@ -10,13 +10,22 @@ use tokio::io;
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
-    match args.get(1) {
-        Some(arg) => match arg.as_str() {
-            "client" => run_client().await,
-            _ => run_server().await,
+    let default_cmd = "server".to_string();
+
+    let mode = args.get(1).or(Some(&default_cmd));
+    match mode {
+        Some(m) => match m.as_str() {
+            "server" => return run_server().await,
+            "client" => return run_client().await,
+            _ => {}
         },
-        _ => run_server().await,
+        None => {}
     }
+
+    return Err(io::Error::new(
+        io::ErrorKind::Other,
+        "Invalid mode. Must be 'server' or 'client'",
+    ));
 }
 
 async fn run_server() -> io::Result<()> {

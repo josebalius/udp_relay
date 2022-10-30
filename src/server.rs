@@ -73,15 +73,31 @@ impl Server {
         buf: &[u8],
         addr: SocketAddr,
     ) -> io::Result<()> {
-        if let Some(key) = self.connections.get(&addr) {
-            if let Some(clients) = self.clients.get(key) {
-                for client in clients {
-                    if client != &addr {
-                        socket.send_to(buf, client).await?;
-                    }
-                }
-            }
+        match self
+            .connections
+            .get(&addr)
+            .take()
+            .map(|key| {
+                self.clients.get(key).map(|addrs| {
+                    addrs
+                        .iter()
+                        .filter(|a| a != &&addr)
+                        .map(|a| socket.send_to(buf, a))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .flatten()
+        {
+            Some(futures) => match futures::future::join_all(futures)
+                .await
+                .into_iter()
+                .find(|f| f.is_err())
+            {
+                Some(Err(e)) => Err(e),
+                _ => Ok(()),
+            },
+
+            _ => Ok(()),
         }
-        Ok(())
     }
 }

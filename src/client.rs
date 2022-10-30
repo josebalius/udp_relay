@@ -59,8 +59,10 @@ impl Client {
 
     async fn send_connect(&self, socket: &UdpSocket) -> io::Result<()> {
         let data = format!("{} {}", server::CONNECT_STR, self.key);
-        socket.send(data.as_bytes()).await?;
-        Ok(())
+        match socket.send(data.as_bytes()).await {
+            Err(e) => Err(e),
+            _ => Ok(()),
+        }
     }
 
     async fn receive(&self, socket: Arc<UdpSocket>, sender: Sender<Packet>) -> io::Result<()> {
