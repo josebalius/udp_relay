@@ -1,0 +1,15 @@
+app = "udp-relay"
+
+[experimental]
+cmd = "./udp_relay"
+
+[env]
+PORT = "8080"
+API_KEY = "test"
+
+[[services]]
+  internal_port = 8080 
+  protocol = "udp"
+
+  [[services.ports]]
+    port = "8080"

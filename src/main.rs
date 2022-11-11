@@ -1,41 +1,21 @@
-mod cli;
-mod client;
 mod server;
 
-use clap::Parser;
-use cli::Cli;
-use client::Client;
+use anyhow::{Context, Result};
 use server::Server;
-use tokio::io;
 
 #[tokio::main]
-async fn main() -> io::Result<()> {
-    let cli = Cli::parse();
+async fn main() -> Result<()> {
+    match std::env::var("API_KEY") {
+        Ok(api_key) => {
+            let port = std::env::var("PORT").context("Failed to get PORT")?;
+            let addr = format!("0.0.0.0:{}", port);
 
-    match cli.command {
-        Some(cli::Commands::Client(client)) => run_client(client).await,
-        Some(cli::Commands::Server(server)) => run_server(server).await,
-        None => {
-            // TODO: print help
-            println!("A command is required, see --help");
+            println!("Running server on addr: {} ...", addr);
+            Server::new(api_key, addr).listen().await
+        }
+        _ => {
+            println!("API_KEY environment variable not set");
             Ok(())
         }
     }
-}
-
-async fn run_server(server: cli::Server) -> io::Result<()> {
-    println!("Running server...");
-    Server::new(server.addr.to_string()).listen().await
-}
-
-async fn run_client(client: cli::Client) -> io::Result<()> {
-    println!("Running client...");
-
-    let client = Client::new(
-        client.remote_addr.to_string(),
-        client.local_addr.to_string(),
-        client.key.to_string(),
-    );
-
-    client.connect_and_relay().await
 }
