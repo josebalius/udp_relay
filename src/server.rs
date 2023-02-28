@@ -119,7 +119,7 @@ impl Server {
             client_id
         );
 
-        println!("registering client: {:?}", client_id);
+        println!("registering client: {:?} {:?}", addr, client_id);
         self.register_client(client_id, addr).await;
         Ok(())
     }

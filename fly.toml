@@ -1,14 +1,17 @@
+# fly.toml file generated for udp-relay on 2022-11-11T08:03:15-05:00
+
 app = "udp-relay"
 
-[experimental]
-cmd = "./udp_relay"
-
 [env]
-PORT = "8080"
-API_KEY = "test"
+  API_KEY = "test"
+  PORT = "8080"
+  DEPLOYMENT = "production"
+
+[experimental]
+  cmd = "./udp_relay"
 
 [[services]]
-  internal_port = 8080 
+  internal_port = 8080
   protocol = "udp"
 
   [[services.ports]]
